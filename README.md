@@ -1,87 +1,80 @@
-# AI Fitness App — Real Project
+# Veya — AI Fitness App
 
-This is the same app that was running in the chat artifact, packaged as an
-actual runnable project. The reason it needs to live here: the chat
-artifact's preview sandbox blocks outbound requests to anything except
-`api.anthropic.com` (Content-Security-Policy), so it could never actually
-reach your Supabase project — no code change could fix that, since it's a
-platform restriction on the artifact preview itself, not a bug in the app.
-Running as a real site removes that restriction entirely.
+Veya is a Vite + React fitness app with guest mode, Supabase persistence, workouts, nutrition logging, XP, cosmetics, courses, recipes, and an AI assistant.
 
-## 1. Install
+## Run locally
 
-```
+```bash
 npm install
-```
-
-## 2. Configure environment variables
-
-```
-cp .env.example .env
-```
-
-The example file already has your Supabase URL and anon key filled in —
-double check they match Project Settings → API in your dashboard.
-
-## 3. Run the database migration (if you haven't already)
-
-Paste `supabase/001_core_schema.sql` (from the earlier setup step) into
-your Supabase project's SQL Editor and run it, if you haven't already.
-
-## 4. Run locally
-
-```
 npm run dev
 ```
 
-Open the URL it prints (usually `http://localhost:5173`). Auth, profile,
-workouts, food log, and XP should now genuinely persist to your Supabase
-project.
+The app uses a root-level Vite entry point (`main.jsx`).
 
-## 5. Deploy the AI Edge Function
+## Environment
 
-The AI Coach and food scanner need a server-side function so your Claude
-API key never reaches the browser. This requires the Supabase CLI:
+Create a local `.env` file from the template:
 
+```bash
+cp .env.example .env
 ```
-npm install -g supabase
+
+Set:
+
+```env
+VITE_SUPABASE_URL=your_supabase_project_url
+VITE_SUPABASE_ANON_KEY=your_supabase_anon_or_publishable_key
+```
+
+Never commit `.env` or any server-side API key.
+
+## Supabase database
+
+The canonical migrations are under `supabase/migrations/`:
+
+1. `20260912000100_core_schema.sql`
+2. `20260912000200_xp_shop_constraint.sql`
+3. `20260912000300_user_cosmetics.sql`
+
+For an existing Supabase project, apply these migrations in order. If using the Supabase CLI, link the project first and use the normal migration workflow.
+
+## AI Coach / food AI
+
+The Anthropic API key must stay server-side. The Edge Function is located at:
+
+```text
+supabase/functions/ai-chat/index.ts
+```
+
+Deploy with the Supabase CLI after linking your project:
+
+```bash
 supabase login
-supabase link --project-ref orosfesudgybtvhbgjxu
+supabase link --project-ref YOUR_PROJECT_REF
 supabase functions deploy ai-chat
-supabase secrets set ANTHROPIC_API_KEY=sk-ant-your-real-key-here
+supabase secrets set ANTHROPIC_API_KEY=YOUR_ANTHROPIC_KEY
 ```
 
-Until this is deployed, the AI Coach and food scanner will fail with a
-network error — everything else (auth, workouts, food log, XP) works
-without it.
+The frontend only calls the Edge Function; it must never contain the Anthropic key.
 
-## 6. Deploy the site itself
+## Production build
 
-Any static host works since this is a plain Vite app — Vercel, Netlify,
-Cloudflare Pages, etc. The general pattern:
-
-```
+```bash
 npm run build
+npm run preview
 ```
 
-This produces a `dist/` folder — point your host at that. Set the same two
-`VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` environment variables in
-your host's dashboard (not the Anthropic key — that only ever goes in the
-Edge Function's secrets, never here).
+Deploy the generated `dist/` directory to a static host such as Vercel, Netlify, or Cloudflare Pages. Configure the same `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` environment variables on the host.
 
-## What's real vs. still local-only
+## Current persistence
 
-Persisted to Supabase: auth, profile, workout history, course completion
-badges, food log, XP transactions.
+Supabase-backed: authentication, profiles, workout history, course badges, food logs, XP transactions, and cosmetic ownership/equipped state.
 
-Still browser-local only (localStorage) for now: daily check-ins, meal
-plan, grocery list, cart, purchase history, recipe-exploration tracking.
-These didn't have tables in the first migration — a follow-up migration
-(`002_courses_recipes_commerce.sql`, not built yet) would move these over
-too.
+Browser-local: guest state and several app features such as daily check-ins, meal planning, grocery/cart state, and some recipe tracking. These will be moved to dedicated tables as the backend is expanded.
 
-## Easiest path from here
+## Important development notes
 
-If you'd rather not manage the CLI commands above by hand, open this
-folder in **Claude Code** — it can run `npm install`, the Supabase CLI,
-and the Edge Function deploy for you directly.
+- Guest mode is intentionally local-only.
+- The current app still contains a large monolithic `App.jsx`; refactoring it into feature modules is planned after the project is stable.
+- XP/shop authorization needs server-side hardening before production launch.
+- Admin authorization also needs a real server-side/RLS role boundary before production launch.
