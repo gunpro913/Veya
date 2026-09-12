@@ -1,104 +1,130 @@
-# Supabase Setup — Core Backend (Auth, Profile, Workouts, Food Log, XP)
+# Supabase Setup
 
-This covers the first slice: authentication + the core tables. Courses,
-recipes, meal plans, grocery lists, and purchases/subscriptions come in a
-follow-up migration once this is working end-to-end.
+## 1. Create/configure your Supabase project
 
-## 1. Get your project credentials
+1. Open your Supabase project dashboard.
+2. Go to **Project Settings → API**.
+3. Copy the **Project URL** and **anon/public key**.
+4. Never put the `service_role`/secret key in the browser or GitHub.
 
-1. Go to [supabase.com/dashboard](https://supabase.com/dashboard) → your project.
-2. **Project Settings → API.**
-3. Copy the **Project URL** and the **anon / public** key.
-4. Do **not** copy the `service_role` / secret key anywhere in this app — it
-   bypasses Row Level Security and must only ever live on a secure server.
+For local development:
 
-## 2. Run the schema migration
-
-1. In the dashboard, open **SQL Editor → New query**.
-2. Paste the full contents of `001_core_schema.sql`.
-3. Click **Run**.
-4. You should see new tables under **Table Editor**: `profiles`,
-   `workout_history`, `course_badges`, `food_logs`, `xp_transactions`,
-   `achievements`, `user_achievements`.
-
-This migration is safe to re-run — it uses `create table if not exists` and
-`drop policy if exists` before recreating policies, so running it twice
-won't duplicate anything or error out.
-
-## 3. What the migration actually sets up
-
-- **`profiles`** — one row per user, auto-created by a database trigger the
-  moment someone signs up (`handle_new_user()`), so the frontend never has
-  to remember to create it manually.
-- **`workout_history`**, **`food_logs`**, **`xp_transactions`**,
-  **`course_badges`**, **`user_achievements`** — all user-owned tables with
-  Row Level Security enabled, restricted to `auth.uid() = user_id`. A user
-  can only ever see or write their own rows — this is enforced by
-  PostgreSQL itself, not by the frontend, so it holds even if the frontend
-  had a bug.
-- **`achievements`** — a small public read-only catalog (not user data), so
-  anyone can look up what an achievement is.
-- **`user_xp_totals`** — a view that sums `xp_transactions` per user. XP is
-  never stored as a single editable number; it's always the sum of
-  individual, timestamped transactions, which is what makes "prevent
-  duplicate XP rewards" actually enforceable later.
-
-## 4. Configure the app
-
-Two ways, depending on where this app is running:
-
-**A. Inside this chat's React artifact** (current setup): open
-`supabaseClient.js` and replace the two placeholder constants at the top:
-
-```js
-const SUPABASE_URL = "https://your-project-ref.supabase.co";
-const SUPABASE_ANON_KEY = "your-anon-public-key";
+```bash
+cp .env.example .env
 ```
 
-**B. In a real project** (recommended for production — see below): copy
-`.env.example` to `.env`, fill in the same two values, and use
-`@supabase/supabase-js`'s `createClient(url, anonKey)` instead of the
-fetch-based shim.
+Then set:
 
-## 5. Why a fetch-based client right now
+```env
+VITE_SUPABASE_URL=https://your-project-ref.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-public-key
+```
 
-The chat environment this app is built in only allows importing from a
-fixed list of pre-approved packages, and `@supabase/supabase-js` isn't on
-it. `supabaseClient.js` talks to Supabase's underlying Auth (GoTrue) and
-Database (PostgREST) HTTP APIs directly with `fetch`, which works the same
-way the real SDK does under the hood — just without the typed client,
-realtime subscriptions, or storage helpers the SDK adds.
+## 2. Apply the database migrations
 
-## 6. What still needs a real project (can't be done from this chat)
+The repository now uses the standard Supabase migration layout:
 
-- Running the `supabase` CLI, `npm install`, or applying migrations
-  automatically — this chat's sandbox has no network access to your
-  project.
-- Deploying an **Edge Function** to keep the Claude API key server-side
-  (Step 18 of your original spec) — there's no deploy target from here.
-  Until that exists, the AI calls in this app go directly from the browser,
-  which is fine for a prototype but not for a real production launch.
-- TypeScript type generation (`supabase gen types typescript`).
+```text
+supabase/
+├── config.toml
+├── functions/
+│   └── ai-chat/
+│       └── index.ts
+└── migrations/
+    ├── 20260912000100_core_schema.sql
+    ├── 20260912000200_xp_shop_constraint.sql
+    └── 20260912000300_user_cosmetics.sql
+```
 
-All of this is exactly what **Claude Code** is built for — it can run the
-CLI, install the real SDK, and deploy Edge Functions. Everything in this
-folder is written to drop straight into a real project when you're ready
-to move there.
+### Using the Supabase CLI (recommended)
 
-## 7. Testing checklist for this slice
+From the repository root:
 
-- [ ] Sign up with a new email — a row appears in `profiles` automatically
-- [ ] Sign in / sign out — session persists across a page reload
-- [ ] Complete a workout — a row appears in `workout_history`, tied to your
-      user id
-- [ ] Log a meal — a row appears in `food_logs`
-- [ ] Create a second test account — confirm it **cannot** see the first
-      account's `workout_history` or `food_logs` rows (this is the RLS
-      check — try querying as User B and confirm you get zero rows, not an
-      error and not User A's data)
+```bash
+supabase login
+supabase link --project-ref YOUR_PROJECT_REF
+supabase db push
+```
 
-## Next migration
+Do not paste migrations into random files or rename them after they have been applied. Supabase uses the migration filenames/timestamps to track database state.
 
-`002_courses_recipes_commerce.sql` (not built yet) will add: courses,
-course sections, recipes, meal plans, grocery lists, purchases, and
-subscriptions, following the same RLS pattern established here.
+### SQL Editor alternative
+
+If you are not using the CLI, run the three migration files in timestamp order in the Supabase SQL Editor:
+
+1. `20260912000100_core_schema.sql`
+2. `20260912000200_xp_shop_constraint.sql`
+3. `20260912000300_user_cosmetics.sql`
+
+The migrations should be reviewed against your existing database before applying them to a project that already contains older Veya tables.
+
+## 3. Authentication
+
+The app uses Supabase Auth. Create a test account and verify that a corresponding `profiles` row is created by the database trigger.
+
+Check:
+
+- Sign up
+- Sign in
+- Sign out
+- Reload the page while signed in
+- Let an access token expire and verify the app can obtain a refreshed session
+
+## 4. AI chat Edge Function
+
+The AI endpoint is now in the correct Supabase location:
+
+```text
+supabase/functions/ai-chat/index.ts
+```
+
+`supabase/config.toml` enables JWT verification for the function.
+
+Set the Anthropic secret in Supabase — **not** in Vite/browser environment variables:
+
+```bash
+supabase secrets set ANTHROPIC_API_KEY=your-key
+```
+
+Deploy:
+
+```bash
+supabase functions deploy ai-chat
+```
+
+The browser should only know the Supabase URL and anon/public key. The Anthropic API key must remain server-side.
+
+## 5. RLS and data ownership
+
+The database uses Row Level Security for user-owned records. Test with two different accounts and confirm that User B cannot read or modify User A's data.
+
+Important: RLS is not a substitute for business-logic authorization. Ownership policies protect rows, while sensitive operations such as XP awards, purchases, badges, cosmetics, and admin actions need server-side validation.
+
+## 6. Production security checklist
+
+- [ ] No service-role/secret key in frontend code
+- [ ] `.env` is ignored by Git
+- [ ] AI API key is stored as a Supabase secret
+- [ ] AI Edge Function verifies the authenticated user
+- [ ] XP awards/spending are enforced server-side
+- [ ] Cosmetic purchases/unlocks are enforced server-side
+- [ ] Admin privileges are enforced server-side/database-side, not by email checks in React
+- [ ] Duplicate rewards are prevented by database constraints/idempotency
+- [ ] Supabase migrations apply cleanly to a fresh database
+- [ ] Existing production data is backed up before schema changes
+
+## 7. Local development
+
+```bash
+npm install
+npm run dev
+```
+
+Production build:
+
+```bash
+npm run build
+npm run preview
+```
+
+If Vite reports missing environment variables, verify `.env` and restart the dev server.
