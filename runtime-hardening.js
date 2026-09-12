@@ -1,12 +1,12 @@
 /* Veya runtime hardening.
  *
- * This stays outside App.jsx so the large UI file does not need a risky
- * whole-file rewrite. It provides two browser-level protections:
- * 1. transparently refreshes expired Supabase access tokens and retries 401s;
- * 2. namespaces the legacy local app-state key by authenticated user id.
+ * Keeps risky changes out of the large App.jsx while providing:
+ * - Supabase access-token refresh + 401 retry;
+ * - per-user isolation for the legacy local-state key;
+ * - routing XP ledger writes through the server-side validation RPC.
  *
- * This is defense-in-depth only. Database RLS/RPCs remain the real security
- * boundary for XP, purchases, roles, and other sensitive operations.
+ * The database remains the security boundary. This file is only a compatibility
+ * layer for the existing UI until the data layer is fully modularized.
  */
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -31,7 +31,7 @@ function userStorageKey(key) {
   return userId ? `${LEGACY_STATE_KEY}:${userId}` : `${LEGACY_STATE_KEY}:guest`;
 }
 
-/* Keep the session itself global, but isolate the app's legacy state. */
+/* Keep the auth session global, but isolate the app's legacy state. */
 Storage.prototype.getItem = function(key) {
   return ORIGINAL_GET.call(this, userStorageKey(key));
 };
@@ -48,16 +48,13 @@ async function refreshSession() {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
   const session = readSession();
   if (!session?.refresh_token) return null;
-
   if (refreshPromise) return refreshPromise;
+
   refreshPromise = (async () => {
     try {
       const response = await ORIGINAL_FETCH(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          apikey: SUPABASE_ANON_KEY,
-        },
+        headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
         body: JSON.stringify({ refresh_token: session.refresh_token }),
       });
       if (!response.ok) {
@@ -77,27 +74,47 @@ async function refreshSession() {
   return refreshPromise;
 }
 
-window.fetch = async function(input, init = {}) {
-  const url = typeof input === "string" ? input : input?.url || "";
-  const isSupabaseRequest = SUPABASE_URL && url.startsWith(SUPABASE_URL);
-  const response = await ORIGINAL_FETCH(input, init);
-
-  if (!isSupabaseRequest || response.status !== 401 || init.__veyaRetried) {
-    return response;
-  }
-
+async function retryWithFreshSession(input, init) {
   const refreshed = await refreshSession();
-  if (!refreshed?.access_token) return response;
-
-  const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+  if (!refreshed?.access_token) return null;
+  const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
   headers.set("Authorization", `Bearer ${refreshed.access_token}`);
   headers.set("apikey", SUPABASE_ANON_KEY);
+  return ORIGINAL_FETCH(input, { ...init, headers });
+}
 
-  return ORIGINAL_FETCH(input, { ...init, headers, __veyaRetried: true });
+window.fetch = async function(input, init = {}) {
+  const url = typeof input === "string" ? input : input?.url || "";
+  const isSupabaseRequest = Boolean(SUPABASE_URL && url.startsWith(SUPABASE_URL));
+
+  /* Existing App.jsx writes xp_transactions directly. Convert those writes
+   * to the validated Postgres function without changing the large UI file. */
+  if (isSupabaseRequest && url.includes("/rest/v1/xp_transactions") && (init.method || "GET").toUpperCase() === "POST") {
+    try {
+      const payload = typeof init.body === "string" ? JSON.parse(init.body) : null;
+      if (payload?.amount != null && payload?.reason) {
+        const session = readSession();
+        const headers = new Headers(init.headers || {});
+        headers.set("Content-Type", "application/json");
+        headers.set("apikey", SUPABASE_ANON_KEY);
+        headers.set("Authorization", `Bearer ${session?.access_token || SUPABASE_ANON_KEY}`);
+        const rpcInit = { ...init, method: "POST", headers, body: JSON.stringify({ p_amount: payload.amount, p_reason: payload.reason }) };
+        let rpcResponse = await ORIGINAL_FETCH(`${SUPABASE_URL}/rest/v1/rpc/veya_apply_xp`, rpcInit);
+        if (rpcResponse.status === 401) rpcResponse = (await retryWithFreshSession(`${SUPABASE_URL}/rest/v1/rpc/veya_apply_xp`, rpcInit)) || rpcResponse;
+        return rpcResponse;
+      }
+    } catch (_) {
+      /* Fall through to the original request so the app can surface its error. */
+    }
+  }
+
+  const response = await ORIGINAL_FETCH(input, init);
+  if (!isSupabaseRequest || response.status !== 401) return response;
+
+  return (await retryWithFreshSession(input, init)) || response;
 };
 
-/* Remove a pre-hardening unscoped state key after the app has had a chance
- * to load it. It is deliberately not copied into a signed-in user's state. */
+/* Never migrate an old unscoped state blob into a signed-in account. */
 try {
   ORIGINAL_REMOVE.call(localStorage, LEGACY_STATE_KEY);
 } catch (_) {}
